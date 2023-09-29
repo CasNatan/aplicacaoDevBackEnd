@@ -1,0 +1,206 @@
+library(shiny)
+library(DBI)
+library(dplyr)
+library(RPostgreSQL)
+library(DT)
+library(shinyBS)
+library(shinyWidgets)
+library(shinyBS)
+
+# Informações de conexão
+host <- "silly.db.elephantsql.com"
+port <- "5432"
+dbname <- "oepmoynb"
+user <- "oepmoynb"
+password <- "bTirmSTQOIWuBQtDCeVJmAiMKhpZ5chq"
+
+con <- dbConnect(PostgreSQL(), host = host, port = port, dbname = dbname, user = user, password = password)
+
+# Função para validar o formato do email
+validar_email <- function(email) {
+  if (grepl("^[A-Za-z0-9+_.-]+@(.+)$", email)) {
+    return(TRUE)
+  } else {
+    return(FALSE)
+  }
+}
+
+# UI
+ui <- fluidPage(
+  titlePanel("Gerenciamento de Contatos"),
+  
+  fluidRow(
+    column(3,
+           textInput("nome", "Nome"),
+           textInput("sobrenome", "Sobrenome"),
+           textInput("email", "Email"),
+           textInput("telefone", "Telefone"),
+           actionButton("adicionar", "Adicionar Contato")
+    ),
+    
+    column(3,
+           textInput("busca", "Buscar por Nome/Sobrenome"),
+           br(),
+           DTOutput("contatos_table")
+    )
+  ),
+  
+  # Modal de edição
+  bsModal("modal_editar", "Editar Contato", "editar_contato_modal_ui", size = "large",
+          actionButton("salvar_edicao", "Salvar"),
+          modalButton("Cancelar")
+  ),
+  
+  # Modal de exclusão
+  bsModal("modal_excluir", "Confirmar Exclusão", "excluir_contato_modal_ui", size = "small",
+          actionButton("confirmar_exclusao", "Confirmar"),
+          modalButton("Cancelar")
+  )
+)
+
+# Pop-up de erro de conexão
+tags$head(tags$script(HTML(
+  "Shiny.addCustomMessageHandler('erro-conexao', function(message) {
+    alert(message);
+  });"
+)))
+
+# Server
+server <- function(input, output, session) {
+  
+  # Carregar contatos
+  contatos <- reactive({
+    query <- "SELECT * FROM contatos"
+    contatos_result <- dbGetQuery(con, query)
+    
+    if (is.null(contatos_result)) {
+      session$sendCustomMessage("erro-conexao", "Infelizmente não foi possível a conexão com o banco de dados do servidor SQL, por favor reinicie o ambiente.")
+      return(data.frame())  # Retorna um dataframe vazio
+    }
+    
+    return(contatos_result)
+  })
+  
+  # Exibir contatos na tabela
+  output$contatos_table <- renderDT({
+    datatable(
+      contatos(),
+      extensions = 'Buttons',
+      options = list(
+        dom = 'Bfrtip',
+        buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+        columnDefs = list(list(className = 'dt-center', targets = "_all")),
+        searching = TRUE
+      ),
+      escape = FALSE,
+      callback = JS(
+        "table.column(5).nodes().to$().each(function() {",
+        "var buttons = '<div class=\"btn-group\">' +
+        '<button class=\"btn btn-primary btn-sm editar\">Editar</button>' +
+        '<button class=\"btn btn-danger btn-sm excluir\">Excluir</button>' +
+        '</div>';",
+        "$(this).html(buttons);",
+        "});",
+        "table.on('click', '.editar', function() {",
+        "var data = table.row($(this).parents('tr')).data();",
+        "Shiny.onInputChange('editar_contato', data);",  # Enviar dados para o modal de edição
+        "shinyBS.addModal('modal_editar', 'Editar Contato', 'editar_contato_modal_ui');",  # Abrir o modal de edição
+        "});",
+        "table.on('click', '.excluir', function() {",
+        "var data = table.row($(this).parents('tr')).data();",
+        "Shiny.onInputChange('excluir_contato', data);",  # Enviar dados para o modal de exclusão
+        "shinyBS.addModal('modal_excluir', 'Confirmar Exclusão', 'excluir_contato_modal_ui');",  # Abrir o modal de exclusão
+        "});"
+      )
+    )
+  })
+  
+  # Adicionar contato
+  observeEvent(input$adicionar, {
+    nome <- input$nome
+    sobrenome <- input$sobrenome
+    email <- input$email
+    telefone <- input$telefone
+    
+    # Validações
+    if (nome == "" || sobrenome == "" || email == "" || telefone == "") {
+      showModal(modalDialog(
+        title = "Erro",
+        "Todos os campos são obrigatórios.",
+        easyClose = TRUE
+      ))
+      return()
+    }
+    
+    if (!validar_email(email)) {
+      showModal(modalDialog(
+        title = "Erro",
+        "O formato do email é inválido.",
+        easyClose = TRUE
+      ))
+      return()
+    }
+    
+    novo_contato <- data.frame(
+      Nome = nome,
+      Sobrenome = sobrenome,
+      Email = email,
+      Telefone = telefone
+    )
+    
+    # Inserir o novo contato no banco de dados
+    dbWriteTable(con, "contatos", novo_contato, append = TRUE)
+  })
+  
+  # Abrir modal de edição
+  observeEvent(input$editar_contato, {
+    showModal("modal_editar")
+    # Aqui você pode carregar os dados do contato para o modal de edição
+    data <- input$editar_contato  # Suponhamos que você passou os dados do contato como input
+    updateTextInput(session, "nome_editar", value = data$Nome)
+    updateTextInput(session, "sobrenome_editar", value = data$Sobrenome)
+    updateTextInput(session, "email_editar", value = data$Email)
+    updateTextInput(session, "telefone_editar", value = data$Telefone)
+  })
+  
+  # Abrir modal de confirmação de exclusão
+  observeEvent(input$excluir_contato, {
+    showModal("modal_excluir")
+    data <- input$excluir_contato  # Suponhamos que você passou os dados do contato como input
+    session$userData <- data  # Armazena os dados do contato para posterior exclusão
+  })
+  
+  # ...
+  
+  # Adicionar ações para salvar ou cancelar no modal de edição
+  observeEvent(input$salvar_edicao, {
+    # Aqui você pode implementar a lógica para salvar as alterações
+    # Feche o modal quando terminar
+    removeModal("modal_editar")
+    # Suponhamos que você já tenha implementado a lógica para atualizar os dados do contato no banco de dados
+  })
+  
+  observeEvent(input$cancelar_edicao, {
+    # Feche o modal quando o usuário cancelar a edição
+    removeModal("modal_editar")
+  })
+  
+  # ...
+  
+  # Adicionar ações para confirmar ou cancelar a exclusão no modal de exclusão
+  observeEvent(input$confirmar_exclusao, {
+    # Aqui você pode implementar a lógica para excluir o contato
+    # Utilize session$userData para acessar os dados do contato a ser excluído
+    data <- session$userData
+    # Implemente a lógica para excluir o contato com base nos dados em 'data'
+    # Feche o modal quando terminar
+    removeModal("modal_excluir")
+  })
+  
+  observeEvent(input$cancelar_exclusao, {
+    # Feche o modal quando o usuário cancelar a exclusão
+    removeModal("modal_excluir")
+  })
+}
+
+shinyApp(ui, server)
